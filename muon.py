@@ -113,6 +113,8 @@ class Muon(torch.optim.Optimizer):
                 # luckily this will perfectly distribute a transformer with multiple of 4 layers to 8 GPUs
                 if i % self.world_size == self.rank:
                     g = p.grad
+                    if g is None:
+                        continue
                     if g.ndim > 2:
                         g = g.view(g.size(0), -1)
                     assert g is not None
@@ -153,7 +155,8 @@ class Muon(torch.optim.Optimizer):
 
             for p in params:
                 g = p.grad
-                assert g is not None
+                if g is None:
+                    continue
                 state = self.state[p]
                 if 'step' not in state:
                     state['step'] = 0
@@ -174,3 +177,4 @@ class Muon(torch.optim.Optimizer):
                 p.data.mul_(1 - lr * weight_decay)
                 p.data.add_(g, alpha=-lr/scale)
 
+        return loss
