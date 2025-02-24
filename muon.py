@@ -1,8 +1,11 @@
-import os
 import torch
 import torch.distributed as dist
+from torch import Tensor
 
-def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
+
+def zeropower_via_newtonschulz5(
+    G: Tensor, steps: int, enable_better_spec_norm_est: bool = False
+) -> Tensor:
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
     quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
@@ -21,8 +24,14 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     # Ensure spectral norm is at most 1
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
     # Perform the NS iterations
-    for _ in range(steps):
+    for i in range(steps):
         A = X @ X.mT
+        if i == 0 and enable_better_spec_norm_est:
+            # Tigher estimate of spectral norm using 1st Gram iteration.
+            # Taken from https://arxiv.org/pdf/2305.16173
+            S_norm_est_over_f_norm__squared = A.norm(dim=(-2, -1), keepdim=True)
+            X = X / (S_norm_est_over_f_norm__squared**0.5 + 1e-7)
+            A = A / (S_norm_est_over_f_norm__squared + 1e-7)
         B = b * A + c * A @ A # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
     
