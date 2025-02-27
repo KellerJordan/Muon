@@ -1,8 +1,10 @@
 import os
+import math
 import torch
 import torch.distributed as dist
 from torch import Tensor
 
+@torch.compile
 def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
@@ -43,44 +45,102 @@ class Muon(torch.optim.Optimizer):
     the advantage that it can be stably run in bfloat16 on the GPU.
 
     Some warnings:
+    - We believe this optimizer is unlikely to work well for training with small batch size.
+    - We believe it may not work well for finetuning pretrained models, but we haven't tested this.
     - This optimizer should not be used for the embedding layer, the final fully connected layer,
     or any {0,1}-D parameters; those should all be optimized by a standard method (e.g., AdamW).
     - To use it with 4D convolutional filters, it works well to just flatten their last 3 dimensions.
 
     Arguments:
+        params: The parameters to be optimized by Muon.
         lr: The learning rate used by the internal SGD.
+        weight_decay: The weight decay parameter.
         momentum: The momentum used by the internal SGD.
         nesterov: Whether to use Nesterov-style momentum in the internal SGD. (recommended)
         ns_steps: The number of Newton-Schulz iteration steps to use.
+        rank: The rank of this process in distributed training.
+        world_size: The total number of processes in distributed training.
     """
-    def __init__(self, params, lr=0.02, weight_decay=0.01, momentum=0.95, nesterov=True, ns_steps=5, rank=0, world_size=1):
+    def __init__(
+        self, 
+        params, 
+        lr=0.02, 
+        weight_decay=0.01, 
+        momentum=0.95, 
+        nesterov=True, 
+        ns_steps=5, 
+        rank=0, 
+        world_size=1
+    ):
         self.rank = rank
         self.world_size = world_size
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+        defaults = dict(
+            lr=lr, 
+            weight_decay=weight_decay, 
+            momentum=momentum, 
+            nesterov=nesterov, 
+            ns_steps=ns_steps
+        )
+        
         params: list[Tensor] = [*params]
         param_groups = []
         for size in {p.numel() for p in params}:
             b = torch.empty(world_size, size, dtype=torch.bfloat16, device="cuda")
-            group = dict(params=[p for p in params if p.numel() == size],
-                         update_buffer=b, update_buffer_views=[b[i] for i in range(world_size)])
+            group = dict(
+                params=[p for p in params if p.numel() == size],
+                update_buffer=b, 
+                update_buffer_views=[b[i] for i in range(world_size)]
+            )
             param_groups.append(group)
+            
         super().__init__(param_groups, defaults)
+    
+    def _adjust_lr_for_muon(self, param_shape, base_lr: float) -> float:
+        """
+        Adjusts the learning rate based on parameter shape.
+        For larger matrices, we scale up the learning rate to maintain effective updates.
+        
+        This replaces the original 'max(1, p_world.size(-2)/p_world.size(-1))**0.5'
+        logic, and tends to be more robust in practice.
+        """
+        # Guard in case the shape is not at least 2D:
+        if len(param_shape) < 2:
+            return base_lr
+
+        A, B = param_shape[-2], param_shape[-1]
+        adjusted_ratio = 0.2 * math.sqrt(float(max(A, B)))
+        return base_lr * adjusted_ratio
 
     @torch.no_grad()
-    def step(self):
+    def step(self, closure=None):
+        """Perform a single optimization step.
+
+        Args:
+            closure (Callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
         for group in self.param_groups:
             update_buffer: Tensor = group["update_buffer"]
             update_buffer_views: list[Tensor] = group["update_buffer_views"]
             # generate weight updates in distributed fashion
             params: list[Tensor] = group["params"]
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
             handle = None
             params_world = None
             def update_prev(): # optimized Muon implementation contributed by @YouJiacheng
                 handle.wait()
                 for p_world, g_world in zip(params_world, update_buffer_views):
-                    p_world.mul_(1 - group["lr"] * group["weight_decay"])
-                    p_world.add_(g_world.view_as(p_world),
-                                 alpha=-group["lr"] * max(1, p_world.size(-2) / p_world.size(-1))**0.5)
+                    # Apply weight decay
+                    p_world.mul_(1 - lr * weight_decay)
+                    # Apply update with adjusted learning rate
+                    adjusted_lr = self._adjust_lr_for_muon(p_world.shape, lr)
+                    p_world.add_(g_world.view_as(p_world), alpha=-adjusted_lr)
             for base_i in range(len(params))[::self.world_size]:
                 if base_i + self.rank < len(params):
                     p = params[base_i + self.rank]
@@ -102,3 +162,5 @@ class Muon(torch.optim.Optimizer):
                 handle = dist.all_gather_into_tensor(update_buffer, g, async_op=True)
                 params_world = params[base_i : base_i + self.world_size]
             update_prev()
+        
+        return loss
