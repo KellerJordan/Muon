@@ -4,6 +4,19 @@ Tool for optimizing the coefficients of the Newton-Schulz iterators in Muon.
 Usage notes:
 - Use a high `epsilon` value to prevent the singular values from either blowing up or switching signs.
 - Set --enable_flatness_aux_loss to get flatter composite curves.
+- In `zeropower_via_newtonschulz5`, replace
+
+```python
+for i in range(steps):
+```
+
+with
+
+```python
+for i, (a, b, c) in enumerate([
+    ...[insert the coefficients here]...
+])
+```
 """
 
 import argparse
