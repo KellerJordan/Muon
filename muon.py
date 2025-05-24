@@ -3,6 +3,7 @@ import torch
 import torch.distributed as dist
 from torch import Tensor
 
+
 def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
@@ -31,6 +32,7 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
         X = X.mT
     return X
 
+
 def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
@@ -39,6 +41,7 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     update = zeropower_via_newtonschulz5(update, steps=group["ns_steps"])
     update *= max(1, grad.size(-2) / grad.size(-1))**0.5
     return update
+
 
 class Muon(torch.optim.Optimizer):
     """
@@ -64,8 +67,7 @@ class Muon(torch.optim.Optimizer):
         defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
         assert isinstance(params, list) and len(params) >= 1 and isinstance(params[0], torch.nn.Parameter)
         params = sorted(params, key=lambda x: x.size(), reverse=True)
-        param_groups = []
-        super().__init__(param_groups, defaults)
+        super().__init__(params, defaults)
 
     @torch.no_grad()
     def step(self):
@@ -80,5 +82,25 @@ class Muon(torch.optim.Optimizer):
                         state["momentum_buffer"] = torch.zeros_like(p)
                     update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
                     p.mul_(1 - group["lr"] * group["weight_decay"])
-                    p.add_(update.view_as(p), alpha=-group["lr"])
+                    p.add_(update, alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
+
+
+class SingleDeviceMuon(torch.optim.Optimizer):
+    """
+    Muon variant that runs on a single device.
+    """
+    def __init__(self, params, lr=0.02, weight_decay=0.01, momentum=0.95):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self):
+        for group in self.param_groups:
+            for p in group["params"]:
+                state = self.state[p]
+                if len(state) == 0:
+                    state["momentum_buffer"] = torch.zeros_like(p)
+                update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                p.mul_(1 - group["lr"] * group["weight_decay"])
+                p.add_(update, alpha=-group["lr"])
