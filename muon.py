@@ -64,7 +64,7 @@ class Muon(torch.optim.Optimizer):
     """
     def __init__(self, params, lr=0.02, weight_decay=0.01):
         defaults = dict(lr=lr, weight_decay=weight_decay)
-        assert isinstance(params, list) and isinstance(params[0], torch.nn.Parameter)
+        assert isinstance(params, list) and len(params) >= 1 and isinstance(params[0], torch.nn.Parameter)
         params = sorted(params, key=lambda x: x.size(), reverse=True)
         param_groups = []
         super().__init__(param_groups, defaults)
@@ -81,4 +81,6 @@ class Muon(torch.optim.Optimizer):
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
                     update = muon_update(p.grad, state["momentum_buffer"])
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    p.add_(update.view_as(p), alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
