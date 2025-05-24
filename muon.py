@@ -31,6 +31,15 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
         X = X.mT
     return X
 
+def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
+    momentum.lerp_(grad, 1 - beta)
+    update = grad.lerp_(momentum, beta) if nesterov else momentum
+    if update.ndim == 4: # for the case of conv filters
+        update = update.view(len(update), -1)
+    update = zeropower_via_newtonschulz5(update, steps=group["ns_steps"])
+    update *= max(1, grad.size(-2) / grad.size(-1))**0.5
+    return update
+
 class Muon(torch.optim.Optimizer):
     """
     Muon - MomentUm Orthogonalized by Newton-schulz
@@ -75,28 +84,20 @@ class Muon(torch.optim.Optimizer):
             params_world = None
             def update_prev(): # optimized Muon implementation contributed by @YouJiacheng
                 handle.wait()
-                for p_world, g_world in zip(params_world, update_buffer_views):
+                for p_world, u_world in zip(params_world, update_buffer_views):
                     p_world.mul_(1 - group["lr"] * group["weight_decay"])
-                    p_world.add_(g_world.view_as(p_world),
-                                 alpha=-group["lr"] * max(1, p_world.size(-2) / p_world.size(-1))**0.5)
+                    p_world.add_(u_world.view_as(p_world), alpha=-group["lr"])
             for base_i in range(len(params))[::dist.get_world_size()]:
                 if base_i + dist.get_rank() < len(params):
                     p = params[base_i + dist.get_rank()]
-                    g = p.grad
-                    assert g is not None
                     state = self.state[p]
                     if "momentum_buffer" not in state:
                         state["momentum_buffer"] = torch.zeros_like(g)
-                    buf: Tensor = state["momentum_buffer"]
-                    buf.lerp_(g, 1 - group["momentum"])
-                    g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
-                    if g.ndim == 4: # for the case of conv filters
-                        g = g.view(len(g), -1)
-                    g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"]).flatten()
+                    update = muon_update(p.grad, state["momentum_buffer"]).flatten()
                 else:
-                    g = update_buffer_views[dist.get_rank()]
+                    update = update_buffer_views[dist.get_rank()]
                 if base_i > 0:
                     update_prev() # async all_gather instead of sync all_reduce by @YouJiacheng
-                handle = dist.all_gather_into_tensor(update_buffer, g, async_op=True)
+                handle = dist.all_gather_into_tensor(update_buffer, update, async_op=True)
                 params_world = params[base_i : base_i + dist.get_world_size()]
             update_prev()
