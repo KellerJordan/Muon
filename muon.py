@@ -51,16 +51,14 @@ class Muon(torch.optim.Optimizer):
     matrix. To efficiently orthogonalize each update, we use a Newton-Schulz iteration, which has
     the advantage that it can be stably run in bfloat16 on the GPU.
 
-    Some warnings:
-    - This optimizer should not be used for the embedding layer, the final fully connected layer,
-    or any {0,1}-D parameters; those should all be optimized by a standard method (e.g., AdamW).
-    - To use it with 4D convolutional filters, it works well to just flatten their last 3 dimensions.
+    Orthogonalization should only be used for hidden weight layers. The embedding and final output
+    fully-connected layer, as well as any 0 or 1-D parameters, should be optimized using a standard
+    method such as AdamW. Convolutional weights should be viewed as 2D and orthogonalized by
+    collapsing their last 3 dimensions.
 
     Arguments:
-        lr: The learning rate used by the internal SGD.
-        momentum: The momentum used by the internal SGD.
-        nesterov: Whether to use Nesterov-style momentum in the internal SGD. (recommended)
-        ns_steps: The number of Newton-Schulz iteration steps to use.
+        lr: The learning rate, in units of spectral norm per update.
+        weight_decay: The AdamW-style weight decay.
     """
     def __init__(self, params, lr=0.02, weight_decay=0.01):
         defaults = dict(lr=lr, weight_decay=weight_decay)
