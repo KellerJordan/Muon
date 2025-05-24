@@ -60,8 +60,8 @@ class Muon(torch.optim.Optimizer):
         lr: The learning rate, in units of spectral norm per update.
         weight_decay: The AdamW-style weight decay.
     """
-    def __init__(self, params, lr=0.02, weight_decay=0.01):
-        defaults = dict(lr=lr, weight_decay=weight_decay)
+    def __init__(self, params, lr=0.02, weight_decay=0.01, momentum=0.95):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
         assert isinstance(params, list) and len(params) >= 1 and isinstance(params[0], torch.nn.Parameter)
         params = sorted(params, key=lambda x: x.size(), reverse=True)
         param_groups = []
@@ -78,7 +78,7 @@ class Muon(torch.optim.Optimizer):
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(p.grad, state["momentum_buffer"])
+                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.view_as(p), alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
