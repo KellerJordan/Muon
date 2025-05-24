@@ -74,8 +74,8 @@ class Muon(torch.optim.Optimizer):
         for group in self.param_groups:
             params = group["params"]
             params_pad = params + [torch.empty_like(params[-1])] * (len(params) % dist.get_world_size())
-            for base_i in range(len(params))[::self.world_size]:
-                if base_i + self.rank < len(params):
+            for base_i in range(len(params))[::dist.get_world_size()]:
+                if base_i + dist.get_rank() < len(params):
                     p = params[base_i + dist.get_rank()]
                     state = self.state[p]
                     if len(state) == 0:
@@ -84,6 +84,47 @@ class Muon(torch.optim.Optimizer):
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update, alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
+
+
+class MuonWithAuxAdam(torch.optim.Optimizer):
+    """
+    Distributed Muon variant that internally contains the AdamW optimizer needed non-hidden parameters.
+
+    Must be used as follows:
+    ```
+    muon_group = dict(params=muon_params, lr=
+    param_groups = [muon_group, adam_group]
+    optimizer = MuonWithAuxAdam(param_groups)
+    ```
+    """
+    def __init__(self, param_groups):
+        for group in param_groups:
+            assert "use_muon" in group
+            if group["use_muon"]:
+                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
+                group["params"] = sorted(group["params"], key=lambda x: x.size(), reverse=True)
+            else:
+                assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
+        super().__init__(param_groups, dict())
+
+    @torch.no_grad()
+    def step(self):
+        for group in self.param_groups:
+            if group["use_muon"]:
+                params = group["params"]
+                params_pad = params + [torch.empty_like(params[-1])] * (len(params) % dist.get_world_size())
+                for base_i in range(len(params))[::dist.get_world_size()]:
+                    if base_i + dist.get_rank() < len(params):
+                        p = params[base_i + dist.get_rank()]
+                        state = self.state[p]
+                        if len(state) == 0:
+                            state["momentum_buffer"] = torch.zeros_like(p)
+                        update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                        p.mul_(1 - group["lr"] * group["weight_decay"])
+                        p.add_(update, alpha=-group["lr"])
+                    dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
+            else:
+                pass
 
 
 class SingleDeviceMuon(torch.optim.Optimizer):
