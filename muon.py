@@ -51,17 +51,18 @@ class Muon(torch.optim.Optimizer):
 
     Muon internally runs standard SGD-momentum, and then performs an orthogonalization post-
     processing step, in which each 2D parameter's update is replaced with the nearest orthogonal
-    matrix. To efficiently orthogonalize each update, we use a Newton-Schulz iteration, which has
-    the advantage that it can be stably run in bfloat16 on the GPU.
+    matrix. For efficient orthogonalization we use a Newton-Schulz iteration, which has the
+    advantage that it can be stably run in bfloat16 on the GPU.
 
-    Orthogonalization should only be used for hidden weight layers. The embedding and final output
-    fully-connected layer, as well as any 0 or 1-D parameters, should be optimized using a standard
-    method such as AdamW. Convolutional weights should be viewed as 2D and orthogonalized by
+    Muon should only be used for hidden weight layers. The input embedding, final output layer,
+    and any internal gains or biases should be optimized using a standard method such as AdamW.
+    Hidden convolutional weights can be trained using Muon by viewing them as 2D and then
     collapsing their last 3 dimensions.
 
     Arguments:
         lr: The learning rate, in units of spectral norm per update.
         weight_decay: The AdamW-style weight decay.
+        momentum: The momentum. A value of 0.95 here is usually fine.
     """
     def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
         defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
@@ -116,12 +117,28 @@ def adam_update(grad, buf1, buf2, step, betas, eps):
 
 class MuonWithAuxAdam(torch.optim.Optimizer):
     """
-    Distributed Muon variant that bakes in an Adam optimizer for the non-hidden matrix parameters.
+    Distributed Muon variant that can be used for all parameters in the network, since it runs an
+    internal AdamW for the parameters that are not compatible with Muon. The user must manually
+    specify which parameters shall be optimized with Muon and which with Adam by passing in a
+    list of param_groups with the `use_muon` flag set.
 
-    Must be used as follows:
+    The point of this class is to allow the user to have a single Opimizer in their code, rather
+    than having both a Muon and an Adam which each need to be stepped.
+
+    You can see an example usage below:
+
+    https://github.com/KellerJordan/modded-nanogpt/blob/master/records/052525_MuonWithAuxAdamExample/b01550f9-03d8-4a9c-86fe-4ab434f1c5e0.txt#L470
     ```
-    muon_group = dict(params=muon_params, lr=..., 
-    param_groups = [muon_group, adam_group]
+    hidden_matrix_params = [p for n, p in model.blocks.named_parameters() if p.ndim >= 2 and "embed" not in n]
+    embed_params = [p for n, p in model.named_parameters() if "embed" in n]
+    scalar_params = [p for p in model.parameters() if p.ndim < 2]
+    head_params = [model.lm_head.weight]
+
+    from muon import MuonWithAuxAdam
+    adam_groups = [dict(params=head_params, lr=0.22), dict(params=embed_params, lr=0.6), dict(params=scalar_params, lr=0.04)]
+    adam_groups = [dict(**g, betas=(0.8, 0.95), eps=1e-10, use_muon=False) for g in adam_groups]
+    muon_group = dict(params=hidden_matrix_params, lr=0.05, momentum=0.95, use_muon=True)
+    param_groups = [*adam_groups, muon_group]
     optimizer = MuonWithAuxAdam(param_groups)
     ```
     """
@@ -179,12 +196,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
     """
     Single-device Muon variant that bakes in an Adam optimizer for the non-hidden matrix parameters.
 
-    Must be used as follows:
-    ```
-    muon_group = dict(params=muon_params, lr=..., 
-    param_groups = [muon_group, adam_group]
-    optimizer = MuonWithAuxAdam(param_groups)
-    ```
+    This can be used the same way as MuonWithAuxAdam.
     """
     def __init__(self, param_groups):
         for group in param_groups:
@@ -228,4 +240,3 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                                          state["step"], group["betas"], group["eps"])
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update, alpha=-group["lr"])
-
