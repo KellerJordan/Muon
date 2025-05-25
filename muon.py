@@ -174,3 +174,58 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update, alpha=-group["lr"])
 
+
+class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
+    """
+    Single-device Muon variant that bakes in an Adam optimizer for the non-hidden matrix parameters.
+
+    Must be used as follows:
+    ```
+    muon_group = dict(params=muon_params, lr=..., 
+    param_groups = [muon_group, adam_group]
+    optimizer = MuonWithAuxAdam(param_groups)
+    ```
+    """
+    def __init__(self, param_groups):
+        for group in param_groups:
+            assert "use_muon" in group
+            if group["use_muon"]:
+                # defaults
+                group["lr"] = group.get("lr", 0.02)
+                group["momentum"] = group.get("momentum", 0.95)
+                group["weight_decay"] = group.get("weight_decay", 0)
+                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
+            else:
+                # defaults
+                group["lr"] = group.get("lr", 3e-4)
+                group["betas"] = group.get("betas", (0.9, 0.95))
+                group["eps"] = group.get("eps", 1e-8)
+                group["weight_decay"] = group.get("weight_decay", 0)
+                assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
+        super().__init__(param_groups, dict())
+
+    @torch.no_grad()
+    def step(self):
+        for group in self.param_groups:
+            if group["use_muon"]:
+                for p in group["params"]:
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["momentum_buffer"] = torch.zeros_like(p)
+                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    p.add_(update, alpha=-group["lr"])
+            else:
+                beta1, beta2 = group["betas"]
+                for p in group["params"]:
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["exp_avg"] = torch.zeros_like(p)
+                        state["exp_avg_sq"] = torch.zeros_like(p)
+                        state["step"] = 0
+                    state["step"] += 1
+                    update = adam_update(p.grad, state["exp_avg"], state["exp_avg_sq"],
+                                         state["step"], group["betas"], group["eps"])
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    p.add_(update, alpha=-group["lr"])
+
