@@ -86,6 +86,34 @@ class Muon(torch.optim.Optimizer):
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
 
 
+class SingleDeviceMuon(torch.optim.Optimizer):
+    """
+    Muon variant for usage in non-distributed settings.
+    """
+    def __init__(self, params, lr=0.02, weight_decay=0.01, momentum=0.95):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self):
+        for group in self.param_groups:
+            for p in group["params"]:
+                state = self.state[p]
+                if len(state) == 0:
+                    state["momentum_buffer"] = torch.zeros_like(p)
+                update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                p.mul_(1 - group["lr"] * group["weight_decay"])
+                p.add_(update, alpha=-group["lr"])
+
+
+def adam_update(grad, buf1, buf2, step, betas, eps):
+    buf1.lerp_(grad, betas[0])
+    buf2.lerp_(grad.square(), betas[1])
+    buf1c = buf1 / (1 - betas[0]**step)
+    buf2c = buf2 / (1 - betas[1]**step)
+    return buf1c / (buf2c.sqrt() + eps)
+
+
 class MuonWithAuxAdam(torch.optim.Optimizer):
     """
     Distributed Muon variant that bakes in an Adam optimizer for the non-hidden matrix parameters.
@@ -141,32 +169,8 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                         state["exp_avg_sq"] = torch.zeros_like(p)
                         state["step"] = 0
                     state["step"] += 1
-                    buf1 = state["exp_avg"]
-                    buf2 = state["exp_avg_sq"]
-                    buf1.lerp_(p.grad, beta1)
-                    buf2.lerp_(p.grad.square(), beta2)
-                    buf1c = buf1 / (1 - beta1**state["step"])
-                    buf2c = buf2 / (1 - beta2**state["step"])
-                    update = buf1c / (buf2c.sqrt() + group["eps"])
+                    update = adam_update(p.grad, state["exp_avg"], state["exp_avg_sq"],
+                                         state["step"], group["betas"], group["eps"])
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update, alpha=-group["lr"])
 
-
-class SingleDeviceMuon(torch.optim.Optimizer):
-    """
-    Muon variant for usage in non-distributed settings.
-    """
-    def __init__(self, params, lr=0.02, weight_decay=0.01, momentum=0.95):
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
-        super().__init__(params, defaults)
-
-    @torch.no_grad()
-    def step(self):
-        for group in self.param_groups:
-            for p in group["params"]:
-                state = self.state[p]
-                if len(state) == 0:
-                    state["momentum_buffer"] = torch.zeros_like(p)
-                update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
-                p.mul_(1 - group["lr"] * group["weight_decay"])
-                p.add_(update, alpha=-group["lr"])
