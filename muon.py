@@ -107,8 +107,8 @@ class SingleDeviceMuon(torch.optim.Optimizer):
 
 
 def adam_update(grad, buf1, buf2, step, betas, eps):
-    buf1.lerp_(grad, betas[0])
-    buf2.lerp_(grad.square(), betas[1])
+    buf1.lerp_(grad, 1 - betas[0])
+    buf2.lerp_(grad.square(), 1 - betas[1])
     buf1c = buf1 / (1 - betas[0]**step)
     buf2c = buf2 / (1 - betas[1]**step)
     return buf1c / (buf2c.sqrt() + eps)
