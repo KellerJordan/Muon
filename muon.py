@@ -139,7 +139,7 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
                 group["betas"] = group.get("betas", (0.9, 0.95))
-                group["eps"] = group.get("eps", 1e-8)
+                group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
         super().__init__(param_groups, dict())
@@ -199,7 +199,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
                 group["betas"] = group.get("betas", (0.9, 0.95))
-                group["eps"] = group.get("eps", 1e-8)
+                group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
         super().__init__(param_groups, dict())
