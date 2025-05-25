@@ -88,11 +88,11 @@ class Muon(torch.optim.Optimizer):
 
 class MuonWithAuxAdam(torch.optim.Optimizer):
     """
-    Distributed Muon variant that internally contains the AdamW optimizer needed non-hidden parameters.
+    Distributed Muon variant that bakes in an Adam optimizer for the non-hidden matrix parameters.
 
     Must be used as follows:
     ```
-    muon_group = dict(params=muon_params, lr=
+    muon_group = dict(params=muon_params, lr=..., 
     param_groups = [muon_group, adam_group]
     optimizer = MuonWithAuxAdam(param_groups)
     ```
@@ -101,9 +101,18 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
         for group in param_groups:
             assert "use_muon" in group
             if group["use_muon"]:
-                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
                 group["params"] = sorted(group["params"], key=lambda x: x.size(), reverse=True)
+                # defaults
+                group["lr"] = group.get("lr", 0.02)
+                group["momentum"] = group.get("momentum", 0.95)
+                group["weight_decay"] = group.get("weight_decay", 0)
+                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
             else:
+                # defaults
+                group["lr"] = group.get("lr", 3e-4)
+                group["betas"] = group.get("betas", (0.9, 0.95))
+                group["eps"] = group.get("eps", 1e-8)
+                group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
         super().__init__(param_groups, dict())
 
@@ -124,12 +133,28 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                         p.add_(update, alpha=-group["lr"])
                     dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
             else:
-                pass
+                beta1, beta2 = group["betas"]
+                for p in group["params"]:
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["exp_avg"] = torch.zeros_like(p)
+                        state["exp_avg_sq"] = torch.zeros_like(p)
+                        state["step"] = 0
+                    state["step"] += 1
+                    buf1 = state["exp_avg"]
+                    buf2 = state["exp_avg_sq"]
+                    buf1.lerp_(p.grad, beta1)
+                    buf2.lerp_(p.grad.square(), beta2)
+                    buf1c = buf1 / (1 - beta1**state["step"])
+                    buf2c = buf2 / (1 - beta2**state["step"])
+                    update = buf1c / (buf2c.sqrt() + group["eps"])
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    p.add_(update, alpha=-group["lr"])
 
 
 class SingleDeviceMuon(torch.optim.Optimizer):
     """
-    Muon variant that runs on a single device.
+    Muon variant for usage in non-distributed settings.
     """
     def __init__(self, params, lr=0.02, weight_decay=0.01, momentum=0.95):
         defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
