@@ -20,16 +20,37 @@ Muon should be used as follows:
 # To replace the above, do the following:
 
 from muon import MuonWithAuxAdam
-hidden_weights = [p for p in model.body.parameters() if p.ndim >= 2]
-hidden_gains_biases = [p for p in model.body.parameters() if p.ndim < 2]
-nonhidden_params = [*model.head.parameters(), *model.embed.parameters()]
+#from muon import SingleDeviceMuonWithAuxAdam
+
+exclude_table = [
+    "model.embed_tokens.weight",
+    "lm_head.weight"
+]
+
+hidden_weights = []
+hidden_gains_biases = []
+nonhidden_params = []
+for named, p in model.named_parameters():
+    # print(named, "->", p.size(), p.ndim)
+    if named in exclude_table:
+        # [*model.head.parameters(), *model.embed.parameters()]
+        nonhidden_params.append(p)
+    elif p.ndim >= 2:
+        # [p for p in model.body.parameters() if p.ndim >= 2]
+        hidden_weights.append(p)
+    else:
+        # [p for p in model.body.parameters() if p.ndim < 2]
+        hidden_gains_biases.append(p)
+
 param_groups = [
     dict(params=hidden_weights, use_muon=True,
          lr=0.02, weight_decay=0.01),
     dict(params=hidden_gains_biases+nonhidden_params, use_muon=False,
          lr=3e-4, betas=(0.9, 0.95), weight_decay=0.01),
 ]
+
 optimizer = MuonWithAuxAdam(param_groups)
+#optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
 ```
 
 You'll have to replace `model.body`, `model.head`, and `model.embed` with whatever is appropriate for your model.
