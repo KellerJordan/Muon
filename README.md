@@ -60,7 +60,7 @@ For a comparison between AdamW, Shampoo, SOAP, and Muon for training a 124M-para
 
 ## More learning resources and results about Muon
 
-* [Blog post on Muon by Jialin Su (the creator of RoPE)](https://kexue.fm/archives/10592)
+* [Blog post on Muon by Jianlin Su (the creator of RoPE)](https://kexue.fm/archives/10592)
 * [Blog post by Jeremy Bernstein on theoretical background of Muon](https://jeremybernste.in/writing/deriving-muon)
 * [Tech report by Kimi.ai on using Muon for scaled training](https://arxiv.org/abs/2502.16982v1)
 * [Why we chose Muon: Our chain of thought (by Jianlin Su at Kimi.ai)](https://x.com/Kimi_Moonshot/status/1897929976948965870)
