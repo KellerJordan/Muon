@@ -97,7 +97,7 @@ class Muon(torch.optim.Optimizer):
                                          async_op=True)
                 all_gather_futures.append(future)
 
-        for fut in gather_futures:
+        for fut in all_gather_futures:
               fut.wait()
 
         return loss
