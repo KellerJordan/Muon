@@ -94,10 +94,11 @@ class Muon(torch.optim.Optimizer):
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
                 future = dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], 
                                          params_pad[base_i + dist.get_rank()], 
-                                         async_op=True).get_future()
+                                         async_op=True)
                 all_gather_futures.append(future)
 
-        torch.futures.wait_all(all_gather_futures)
+        for fut in gather_futures:
+              fut.wait()
 
         return loss
 
