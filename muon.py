@@ -135,6 +135,23 @@ def adam_update(grad, buf1, buf2, step, betas, eps):
     return buf1c / (buf2c.sqrt() + eps)
 
 
+def adamw_rms_precondition(grad, exp_avg_sq, step: int, beta2: float, eps: float):
+    """
+    AdamW-style adaptive preconditioning using only the 2nd moment (RMS term):
+
+      v_t = beta2 * v_{t-1} + (1-beta2) * g_t^2
+      g'_t = g_t / (sqrt(v_t / (1-beta2^t)) + eps)
+
+    Returns a tensor with the same dtype as `grad` (safe to pass into `muon_update`).
+    """
+    g32 = grad if grad.dtype == torch.float32 else grad.float()
+    exp_avg_sq.lerp_(g32.square(), 1 - beta2)
+    bias_correction2 = 1 - beta2 ** step
+    denom = (exp_avg_sq / bias_correction2).sqrt().add_(eps)
+    g_pre = g32 / denom
+    return g_pre if grad.dtype == torch.float32 else g_pre.to(grad.dtype)
+
+
 class MuonWithAuxAdam(torch.optim.Optimizer):
     """
     Distributed Muon variant that can be used for all parameters in the network, since it runs an
@@ -284,3 +301,160 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     p.add_(update, alpha=-group["lr"])
 
         return loss
+
+
+class MuonWithAuxAdamAdaptive(torch.optim.Optimizer):
+    """
+    Experimental variant of MuonWithAuxAdam that applies AdamW-style adaptive preconditioning
+    (2nd moment / RMS term) to the gradients BEFORE the Muon orthogonalization step.
+    """
+
+    def __init__(self, param_groups):
+        for group in param_groups:
+            assert "use_muon" in group
+            if group["use_muon"]:
+                group["params"] = sorted(group["params"], key=lambda x: x.size(), reverse=True)
+                # defaults
+                group["lr"] = group.get("lr", 0.02)
+                group["momentum"] = group.get("momentum", 0.95)
+                group["weight_decay"] = group.get("weight_decay", 0)
+                group["beta2"] = group.get("beta2", 0.95)
+                group["eps"] = group.get("eps", 1e-10)
+                assert set(group.keys()) == set(
+                    ["params", "lr", "momentum", "weight_decay", "beta2", "eps", "use_muon"]
+                )
+            else:
+                # defaults
+                group["lr"] = group.get("lr", 3e-4)
+                group["betas"] = group.get("betas", (0.9, 0.95))
+                group["eps"] = group.get("eps", 1e-10)
+                group["weight_decay"] = group.get("weight_decay", 0)
+                assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
+        super().__init__(param_groups, dict())
+
+    @torch.no_grad()
+    def step(self, closure=None):
+
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if group["use_muon"]:
+                params = group["params"]
+                params_pad = params + [torch.empty_like(params[-1])] * (
+                        dist.get_world_size() - len(params) % dist.get_world_size()
+                )
+                for base_i in range(len(params))[::dist.get_world_size()]:
+                    if base_i + dist.get_rank() < len(params):
+                        p = params[base_i + dist.get_rank()]
+                        if p.grad is None:
+                            # continue
+                            p.grad = torch.zeros_like(p)  # Force synchronization
+                        state = self.state[p]
+                        if len(state) == 0:
+                            state["momentum_buffer"] = torch.zeros_like(p)
+                            state["exp_avg_sq"] = torch.zeros_like(p, dtype=torch.float32)
+                            state["step"] = 0
+                        state["step"] += 1
+                        g_pre = adamw_rms_precondition(
+                            p.grad, state["exp_avg_sq"], state["step"], group["beta2"], group["eps"]
+                        )
+                        update = muon_update(g_pre, state["momentum_buffer"], beta=group["momentum"])
+                        p.mul_(1 - group["lr"] * group["weight_decay"])
+                        p.add_(update.reshape(p.shape), alpha=-group["lr"])
+                    dist.all_gather(
+                        params_pad[base_i: base_i + dist.get_world_size()],
+                        params_pad[base_i + dist.get_rank()],
+                    )
+            else:
+                for p in group["params"]:
+                    if p.grad is None:
+                        # continue
+                        p.grad = torch.zeros_like(p)  # Force synchronization
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["exp_avg"] = torch.zeros_like(p)
+                        state["exp_avg_sq"] = torch.zeros_like(p)
+                        state["step"] = 0
+                    state["step"] += 1
+                    update = adam_update(p.grad, state["exp_avg"], state["exp_avg_sq"],
+                                         state["step"], group["betas"], group["eps"])
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    p.add_(update, alpha=-group["lr"])
+
+        return loss
+
+
+class SingleDeviceMuonWithAuxAdamAdaptive(torch.optim.Optimizer):
+    """
+    Non-distributed variant of MuonWithAuxAdamAdaptive.
+    """
+
+    def __init__(self, param_groups):
+        for group in param_groups:
+            assert "use_muon" in group
+            if group["use_muon"]:
+                # defaults
+                group["lr"] = group.get("lr", 0.02)
+                group["momentum"] = group.get("momentum", 0.95)
+                group["weight_decay"] = group.get("weight_decay", 0)
+                group["beta2"] = group.get("beta2", 0.95)
+                group["eps"] = group.get("eps", 1e-10)
+                assert set(group.keys()) == set(
+                    ["params", "lr", "momentum", "weight_decay", "beta2", "eps", "use_muon"]
+                )
+            else:
+                # defaults
+                group["lr"] = group.get("lr", 3e-4)
+                group["betas"] = group.get("betas", (0.9, 0.95))
+                group["eps"] = group.get("eps", 1e-10)
+                group["weight_decay"] = group.get("weight_decay", 0)
+                assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
+        super().__init__(param_groups, dict())
+
+    @torch.no_grad()
+    def step(self, closure=None):
+
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if group["use_muon"]:
+                for p in group["params"]:
+                    if p.grad is None:
+                        # continue
+                        p.grad = torch.zeros_like(p)  # Force synchronization
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["momentum_buffer"] = torch.zeros_like(p)
+                        state["exp_avg_sq"] = torch.zeros_like(p, dtype=torch.float32)
+                        state["step"] = 0
+                    state["step"] += 1
+                    g_pre = adamw_rms_precondition(
+                        p.grad, state["exp_avg_sq"], state["step"], group["beta2"], group["eps"]
+                    )
+                    update = muon_update(g_pre, state["momentum_buffer"], beta=group["momentum"])
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    p.add_(update.reshape(p.shape), alpha=-group["lr"])
+            else:
+                for p in group["params"]:
+                    if p.grad is None:
+                        # continue
+                        p.grad = torch.zeros_like(p)  # Force synchronization
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["exp_avg"] = torch.zeros_like(p)
+                        state["exp_avg_sq"] = torch.zeros_like(p)
+                        state["step"] = 0
+                    state["step"] += 1
+                    update = adam_update(p.grad, state["exp_avg"], state["exp_avg_sq"],
+                                         state["step"], group["betas"], group["eps"])
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    p.add_(update, alpha=-group["lr"])
+
+        return loss
+
