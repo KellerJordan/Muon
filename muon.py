@@ -31,9 +31,15 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
-def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
-    momentum.lerp_(grad, 1 - beta)
-    update = grad.lerp_(momentum, beta) if nesterov else momentum
+def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, momentum_sum: bool = False):
+    if momentum_sum:
+        # Paper form B_t = beta * B_{t-1} + G_t. The default below stays
+        # the shipped running average beta * B + (1 - beta) * G.
+        momentum.mul_(beta).add_(grad)
+        update = grad.add(momentum, alpha=beta) if nesterov else momentum
+    else:
+        momentum.lerp_(grad, 1 - beta)
+        update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim == 4: # for the case of conv filters
         update = update.view(len(update), -1)
     update = zeropower_via_newtonschulz5(update, steps=ns_steps)
@@ -62,8 +68,8 @@ class Muon(torch.optim.Optimizer):
         weight_decay: The AdamW-style weight decay.
         momentum: The momentum. A value of 0.95 here is usually fine.
     """
-    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
+    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95, momentum_sum=False):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum, momentum_sum=momentum_sum)
         assert isinstance(params, list) and len(params) >= 1 and isinstance(params[0], torch.nn.Parameter)
         params = sorted(params, key=lambda x: x.size(), reverse=True)
         super().__init__(params, defaults)
@@ -88,7 +94,7 @@ class Muon(torch.optim.Optimizer):
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"], momentum_sum=group.get("momentum_sum", False))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
@@ -100,8 +106,8 @@ class SingleDeviceMuon(torch.optim.Optimizer):
     """
     Muon variant for usage in non-distributed settings.
     """
-    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
+    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95, momentum_sum=False):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum, momentum_sum=momentum_sum)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -120,7 +126,7 @@ class SingleDeviceMuon(torch.optim.Optimizer):
                 state = self.state[p]
                 if len(state) == 0:
                     state["momentum_buffer"] = torch.zeros_like(p)
-                update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"], momentum_sum=group.get("momentum_sum", False))
                 p.mul_(1 - group["lr"] * group["weight_decay"])
                 p.add_(update.reshape(p.shape), alpha=-group["lr"])
 
@@ -202,7 +208,7 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                         state = self.state[p]
                         if len(state) == 0:
                             state["momentum_buffer"] = torch.zeros_like(p)
-                        update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                        update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"], momentum_sum=group.get("momentum_sum", False))
                         p.mul_(1 - group["lr"] * group["weight_decay"])
                         p.add_(update.reshape(p.shape), alpha=-group["lr"])
                     dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
@@ -264,7 +270,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"], momentum_sum=group.get("momentum_sum", False))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
             else:
