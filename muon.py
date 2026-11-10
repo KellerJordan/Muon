@@ -36,8 +36,9 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim == 4: # for the case of conv filters
         update = update.view(len(update), -1)
-    update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-    update *= max(1, update.size(-2) / update.size(-1))**0.5
+    if update.ndim >= 2:
+        update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+        update *= max(1, update.size(-2) / update.size(-1))**0.5
     return update
 
 
